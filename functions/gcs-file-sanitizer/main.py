@@ -174,11 +174,11 @@ def sanitize_png_file(temp_file):
 
 
 def gcs_file_sanitizer(data, context):
+    logging.debug(context)
+
     if not os.environ.get('TARGET_BUCKET_NAME'):
         logging.error("Function does not have correct configuration")
         sys.exit(1)
-
-    logging.debug(context)
 
     GGSFileSanitizer().sanitize(data)
 
