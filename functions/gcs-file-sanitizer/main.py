@@ -10,7 +10,7 @@ import numpy as np
 
 from google.cloud import storage
 from PIL import Image
-from PyPDF2 import PdfFileReader, PdfFileWriter, PdfReadWarning
+from PyPDF2 import PdfFileReader, PdfFileWriter, utils
 
 from modules.pdfid import PDFiD
 from modules.gcs_stream_to_blob import GCSObjectStreamUpload
@@ -113,7 +113,7 @@ def sanitize_pdf_file(data, temp_file):
             reader = PdfFileReader(temp_file, strict=False)
             [writer.addPage(reader.getPage(i)) for i in range(0, reader.getNumPages())]
             writer.removeLinks()
-        except PdfReadWarning as e:
+        except utils.PdfReadWarning as e:
             logging.info(
                 f"An exception occurred when reading PDF file '{data['name']}', continuing sanitizing: {str(e)}")
             pass
