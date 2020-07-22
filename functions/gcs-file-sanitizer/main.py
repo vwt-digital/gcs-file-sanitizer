@@ -16,18 +16,22 @@ from modules.pdfid import PDFiD
 from modules.gcs_stream_to_blob import GCSObjectStreamUpload
 
 logging.getLogger().setLevel(logging.INFO)
-Image.MAX_IMAGE_PIXELS = 536870912
 
 
 class GGSFileSanitizer(object):
     def __init__(self):
         self.stg_client = storage.Client()
         self.target_bucket_name = os.environ.get('TARGET_BUCKET_NAME')
+        self.max_file_size = int(os.environ.get('MAX_FILE_SIZE', 536870912))  # Defaults to 512MB
+
+        Image.MAX_IMAGE_PIXELS = self.max_file_size
 
     def sanitize(self, data):
         # Only sanitizing files smaller than 0.5GB
-        if int(data['size']) > 536870912:
-            logging.info(f"File '{data['name']}' too big to process, skipping sanitizing")
+        if int(data['size']) > self.max_file_size:
+            logging.info(
+                f"File '{data['name']}' too big to process (size: {data['size']}, max: {self.max_file_size}), " +
+                "skipping sanitizing")
             sys.exit()
 
         # Only sanitizing files of certain type
@@ -108,6 +112,10 @@ def sanitize_pdf_file(data, temp_file):
         reader = PdfFileReader(temp_file)
         [writer.addPage(reader.getPage(i)) for i in range(0, reader.getNumPages())]
         writer.removeLinks()
+
+        # Unlink original temp file
+        temp_file.close()
+        os.unlink(temp_file.name)
 
         with tempfile.NamedTemporaryFile(mode='w+b', delete=False) as temp_flat_file:
             writer.write(temp_flat_file)

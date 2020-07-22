@@ -1,0 +1,20 @@
+---
+steps:
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'gcloud'
+    args:
+      - 'functions'
+      - 'deploy'
+      - '${PROJECT_ID}-gcs-file-sanitizer-func'
+      - '--entry-point=gcs_file_sanitizer'
+      - '--runtime=python37'
+      - '--trigger-resource="TRIGGER-BUCKET-NAME"'
+      - '--trigger-event=google.storage.object.finalize'
+      - '--project=${PROJECT_ID}'
+      - '--region=europe-west1'
+      - '--max-instances=10'
+      - '--memory=1024MB'
+      - '--set-env-vars'
+      - 'TARGET_BUCKET_NAME="TARGET-BUCKET-NAME"'
+      - 'MAX_FILE_SIZE=MAX_FILE_SIZE'
+    dir: 'gcs-file-sanitizer/functions/gcs-file-sanitizer'
