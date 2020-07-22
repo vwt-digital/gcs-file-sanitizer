@@ -4,15 +4,12 @@ import json
 import tempfile
 import os
 import mimetypes
-import xmltodict
-import defusedxml
 import numpy as np
 
 from google.cloud import storage
 from PIL import Image
 from PyPDF2 import PdfFileReader, PdfFileWriter, utils
 
-from modules.pdfid import PDFiD
 from modules.gcs_stream_to_blob import GCSObjectStreamUpload
 
 logging.getLogger().setLevel(logging.INFO)
@@ -53,8 +50,7 @@ class GGSFileSanitizer(object):
 
         # Write file contents to temporary file
         temp_file_save = None
-        temp_file = tempfile.NamedTemporaryFile(
-            mode='w+b', delete=False, suffix=mimetypes.guess_extension(data['contentType']))
+        temp_file = tempfile.NamedTemporaryFile(mode='w+b', suffix=mimetypes.guess_extension(data['contentType']))
         source_blob.download_to_filename(temp_file.name)
 
         try:
@@ -66,14 +62,9 @@ class GGSFileSanitizer(object):
                 temp_file_save = sanitize_png_file(temp_file)
         except Exception as e:
             temp_file.close()
-            os.unlink(temp_file.name)  # Unlink
 
             logging.info(f"An exception occurred when sanitizing file '{data['name']}', skipping sanitizing: {str(e)}")
             sys.exit()
-
-        # Unlink original temp file
-        temp_file.close()
-        os.unlink(temp_file.name)
 
         if temp_file_save:
             self.write_stream_to_blob(
@@ -101,41 +92,31 @@ class GGSFileSanitizer(object):
 
 
 def sanitize_pdf_file(data, temp_file):
-    defusedxml.defuse_stdlib()
-    xml_keywords = xmltodict.parse(PDFiD(temp_file.name).toxml("UTF-8")).get('PDFiD', {}).get('Keywords', {})
+    # Remove links from PDF file
+    writer = PdfFileWriter()
+    try:
+        reader = PdfFileReader(temp_file, strict=False)
+        [writer.addPage(reader.getPage(i)) for i in range(0, reader.getNumPages())]
+        writer.removeLinks()
+    except utils.PdfReadWarning as e:
+        logging.info(
+            f"An exception occurred when reading PDF file '{data['name']}', continuing sanitizing: {str(e)}")
+        pass
 
-    if xml_keywords:
-        logging.info(f"Found {len(xml_keywords.get('Keyword'))} obfuscations for '{data['name']}', starting sanitizing")
+    # Unlink original temp file
+    temp_file.close()
 
-        # Remove links from PDF file
-        writer = PdfFileWriter()
-        try:
-            reader = PdfFileReader(temp_file, strict=False)
-            [writer.addPage(reader.getPage(i)) for i in range(0, reader.getNumPages())]
-            writer.removeLinks()
-        except utils.PdfReadWarning as e:
-            logging.info(
-                f"An exception occurred when reading PDF file '{data['name']}', continuing sanitizing: {str(e)}")
-            pass
+    with tempfile.NamedTemporaryFile(mode='w+b', delete=False) as temp_flat_file:
+        writer.write(temp_flat_file)
+        temp_flat_file.close()
 
-        # Unlink original temp file
-        temp_file.close()
-        os.unlink(temp_file.name)
-
-        with tempfile.NamedTemporaryFile(mode='w+b', delete=False) as temp_flat_file:
-            writer.write(temp_flat_file)
-            temp_flat_file.close()
-
-        return temp_flat_file
-    else:
-        logging.info(f"Found no obfuscations for '{data['name']}', skipping sanitizing")
-        temp_file.close()
-        return temp_file
+    return temp_flat_file
 
 
 def sanitize_jpeg_file(temp_file):
     # Load image
     im = Image.open(temp_file.name)
+    temp_file.close()
 
     # Convert to format that cannot store IPTC/EXIF or comments, i.e. Numpy array
     na = np.array(im)
@@ -152,6 +133,7 @@ def sanitize_jpeg_file(temp_file):
 def sanitize_png_file(temp_file):
     # Load image
     im = Image.open(temp_file.name)
+    temp_file.close()
 
     # Convert to format that cannot store IPTC/EXIF or comments, i.e. Numpy array
     na = np.array(im)
