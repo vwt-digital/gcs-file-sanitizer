@@ -3,6 +3,7 @@ import logging
 import json
 import tempfile
 import os
+import mimetypes
 import xmltodict
 import defusedxml
 import numpy as np
@@ -15,6 +16,7 @@ from modules.pdfid import PDFiD
 from modules.gcs_stream_to_blob import GCSObjectStreamUpload
 
 logging.getLogger().setLevel(logging.INFO)
+Image.MAX_IMAGE_PIXELS = 536870912
 
 
 class GGSFileSanitizer(object):
@@ -22,7 +24,7 @@ class GGSFileSanitizer(object):
         self.stg_client = storage.Client()
         self.target_bucket_name = os.environ.get('TARGET_BUCKET_NAME')
 
-    def sanitize(self, data, context):
+    def sanitize(self, data):
         # Only sanitizing files smaller than 0.5GB
         if int(data['size']) > 536870912:
             logging.info(f"File '{data['name']}' too big to process, skipping sanitizing")
@@ -31,7 +33,8 @@ class GGSFileSanitizer(object):
         # Only sanitizing files of certain type
         if data['contentType'] not in ['application/pdf', 'image/png', 'image/jpeg']:
             logging.info(
-                f"File '{data['name']}' not of type 'application/pdf', 'image/png' or 'image/jpeg', skipping sanitizing")
+                f"File '{data['name']}' not of type 'application/pdf', 'image/png' or 'image/jpeg', " +
+                "skipping sanitizing")
             sys.exit()
 
         source_bucket = self.stg_client.get_bucket(data['bucket'])
@@ -46,7 +49,8 @@ class GGSFileSanitizer(object):
 
         # Write file contents to temporary file
         temp_file_save = None
-        temp_file = tempfile.NamedTemporaryFile(mode='w+b', delete=False)
+        temp_file = tempfile.NamedTemporaryFile(
+            mode='w+b', delete=False, suffix=mimetypes.guess_extension(data['contentType']))
         source_blob.download_to_filename(temp_file.name)
 
         try:
@@ -68,7 +72,8 @@ class GGSFileSanitizer(object):
         os.unlink(temp_file.name)
 
         if temp_file_save:
-            self.write_stream_to_blob(data['name'], open(temp_file_save.name, 'rb'))
+            self.write_stream_to_blob(
+                path=data['name'], content=open(temp_file_save.name, 'rb'), content_type=data['contentType'])
             os.unlink(temp_file_save.name)  # Unlink
 
             logging.info(
@@ -77,13 +82,18 @@ class GGSFileSanitizer(object):
         else:
             logging.info(f"File '{data['name']}' has been unsuccessfully sanitized")
 
-    def write_stream_to_blob(self, path, content):
-        with GCSObjectStreamUpload(client=self.stg_client, bucket_name=self.target_bucket_name, blob_name=path) as f, \
-                content as fp:
-            buffer = fp.read(1024)
-            while buffer:
-                f.write(buffer)
+    def write_stream_to_blob(self, path, content, content_type):
+        try:
+            with GCSObjectStreamUpload(
+                    client=self.stg_client, bucket_name=self.target_bucket_name, blob_name=path,
+                    content_type=content_type) as f, content as fp:
                 buffer = fp.read(1024)
+                while buffer:
+                    f.write(buffer)
+                    buffer = fp.read(1024)
+        except Exception as e:
+            logging.info(f"An exception occurred when moving file '{path}', skipping moving: {str(e)}")
+            sys.exit()
 
 
 def sanitize_pdf_file(data, temp_file):
@@ -119,7 +129,7 @@ def sanitize_jpeg_file(temp_file):
 
     # Create new image from the Numpy array and save
     temp_file_sanitized = tempfile.NamedTemporaryFile(mode='w+b', delete=False)
-    Image.fromarray(na).save(temp_file_sanitized.name)
+    Image.fromarray(na).save(temp_file_sanitized.name, format='jpeg')
 
     # Return temporary file
     temp_file_sanitized.close()
@@ -143,7 +153,7 @@ def sanitize_png_file(temp_file):
 
     # Save result
     temp_file_sanitized = tempfile.NamedTemporaryFile(mode='w+b', delete=False)
-    result.save(temp_file_sanitized)
+    result.save(temp_file_sanitized, format='png')
 
     # Return temporary file
     temp_file_sanitized.close()
@@ -155,11 +165,13 @@ def gcs_file_sanitizer(data, context):
         logging.error("Function does not have correct configuration")
         sys.exit(1)
 
-    GGSFileSanitizer().sanitize(data, context)
+    logging.debug(context)
+
+    GGSFileSanitizer().sanitize(data)
 
 
 if __name__ == '__main__':
-    with open('payload_2.json', 'r') as json_file:
+    with open('payload.json', 'r') as json_file:
         payload = json.load(json_file)
 
     gcs_file_sanitizer(payload['data'], payload['context'])

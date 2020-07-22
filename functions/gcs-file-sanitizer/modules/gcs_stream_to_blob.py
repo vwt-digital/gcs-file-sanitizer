@@ -11,11 +11,13 @@ class GCSObjectStreamUpload(object):
             client: storage.Client,
             bucket_name: str,
             blob_name: str,
+            content_type: str,
             chunk_size: int = 256 * 1024
     ):
         self._client = client
         self._bucket = self._client.bucket(bucket_name)
         self._blob = self._bucket.blob(blob_name)
+        self._content_type = content_type
 
         self._buffer = b''
         self._buffer_size = 0
@@ -45,7 +47,7 @@ class GCSObjectStreamUpload(object):
         )
         self._request.initiate(
             transport=self._transport,
-            content_type='application/octet-stream',
+            content_type=self._content_type,
             stream=self,
             stream_final=False,
             metadata={'name': self._blob.name},
