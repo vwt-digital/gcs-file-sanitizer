@@ -19,10 +19,10 @@ class DBDatastore(object):
         entity = self.db_client.get(entity_key)
 
         if not entity:
-            logging.info(f"Entity for file '{object_id}' does not exist in database 'datastore/{self.db_name}'")
-            sys.exit()
+            return False
 
         self.db_client.put(create_updated_entity(entity, object_id, bucket_name))
+        return True
 
 
 class DBFirestore(object):
@@ -35,10 +35,10 @@ class DBFirestore(object):
         doc = doc_ref.get()
 
         if not doc.exists:
-            logging.info(f"Entity for file '{object_id}' does not exist in database 'firestore/{self.db_name}'")
-            sys.exit()
+            return False
 
         doc_ref.update(create_updated_entity(doc, object_id, bucket_name))
+        return True
 
 
 def create_updated_entity(entity, object_id, bucket_name):
@@ -65,9 +65,12 @@ def gcs_entity_processor(data, context):
     else:
         db_class = DBFirestore(db_name)
 
-    db_class.update_status(data['name'], data['bucket'])
+    status = db_class.update_status(data['name'], data['bucket'])
 
-    logging.info(f"Entity for file '{data['name']}' successfully updated in database '{db_type}/{db_name}'")
+    if status:
+        logging.info(f"Entity for file '{data['name']}' successfully updated in database '{db_type}/{db_name}'")
+    else:
+        logging.info(f"Entity for file '{data['name']}' does not exist in database 'firestore/{db_name}'")
 
 
 if __name__ == '__main__':
