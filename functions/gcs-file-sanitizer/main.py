@@ -231,7 +231,7 @@ def process_status(status, entity_id):
         else:
             logging.info(f"Entity for file '{entity_id}' does not exist in database '{db_type}/{db_name}'")
     else:
-        logging.debug('Skipping processing of status due to missing configuration')
+        logging.debug(f"Skipping processing of status to '{status}' due to missing configuration")
 
 
 def gcs_file_sanitizer(data, context):
@@ -242,6 +242,7 @@ def gcs_file_sanitizer(data, context):
         sys.exit(1)
 
     try:
+        process_status('uploaded', data['name'])
         GGSFileSanitizer().sanitize(data)
     except MemoryError as error:
         logging.error(error)
