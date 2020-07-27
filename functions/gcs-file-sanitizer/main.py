@@ -116,7 +116,7 @@ class GGSFileSanitizer(object):
 
         writer = PdfFileWriter()
         try:
-            reader = PdfFileReader(temp_file)
+            reader = PdfFileReader(temp_file, strict=False)
             writer.appendPagesFromReader(reader)
 
             writer.removeLinks()
