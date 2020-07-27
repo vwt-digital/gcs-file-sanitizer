@@ -70,7 +70,7 @@ def gcs_entity_processor(data, context):
     if status:
         logging.info(f"Entity for file '{data['name']}' successfully updated in database '{db_type}/{db_name}'")
     else:
-        logging.info(f"Entity for file '{data['name']}' does not exist in database 'firestore/{db_name}'")
+        logging.info(f"Entity for file '{data['name']}' does not exist in database '{db_type}/{db_name}'")
 
 
 if __name__ == '__main__':
