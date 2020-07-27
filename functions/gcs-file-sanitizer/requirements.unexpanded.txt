@@ -1,5 +1,7 @@
 gcsfs==0.6.2
 google-auth==1.19.2
+google-cloud-datastore==1.13.2
+google-cloud-firestore==1.8.1
 google-cloud-storage==1.29.0
 google-resumable-media==0.6.0
 numpy==1.19.1
