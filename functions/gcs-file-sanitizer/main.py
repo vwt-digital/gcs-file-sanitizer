@@ -1,16 +1,20 @@
+import os
+import io
 import sys
 import logging
 import json
+import math
 import tempfile
-import os
-import mimetypes
+
+import google.auth
+import google.auth.transport.requests as tr_requests
 import numpy as np
 
 from google.cloud import storage
+from google.resumable_media.requests import ChunkedDownload, ResumableUpload
+
 from PIL import Image
 from PyPDF2 import PdfFileReader, PdfFileWriter, utils
-
-from modules.gcs_stream_to_blob import GCSObjectStreamUpload
 
 logging.getLogger().setLevel(logging.INFO)
 
@@ -19,7 +23,10 @@ class GGSFileSanitizer(object):
     def __init__(self):
         self.stg_client = storage.Client()
         self.target_bucket_name = os.environ.get('TARGET_BUCKET_NAME')
-        self.max_file_size = int(os.environ.get('MAX_FILE_SIZE', 536870912))  # Defaults to 512MB
+        self.max_file_size = int(os.environ.get('MAX_FILE_SIZE', 268435456))  # Defaults to 256MB
+
+        self.credentials, _ = google.auth.default(scopes=['https://www.googleapis.com/auth/devstorage.read_write'])
+        self.transport = tr_requests.AuthorizedSession(self.credentials)
 
         Image.MAX_IMAGE_PIXELS = self.max_file_size
 
@@ -29,130 +36,129 @@ class GGSFileSanitizer(object):
             logging.info(
                 f"File '{data['name']}' too big to process (size: {data['size']}, max: {self.max_file_size}), " +
                 "skipping sanitizing")
-            sys.exit()
+            sys.exit(0)
 
         # Only sanitizing files of certain type
         if data['contentType'] not in ['application/pdf', 'image/png', 'image/jpeg']:
             logging.info(
                 f"File '{data['name']}' not of type 'application/pdf', 'image/png' or 'image/jpeg', " +
                 "skipping sanitizing")
-            sys.exit()
-
-        source_bucket = self.stg_client.get_bucket(data['bucket'])
-        source_blob = source_bucket.blob(data['name'])
-
-        # Check if file exists in defined bucket
-        if not source_blob.exists():
-            logging.info(f"File '{data['name']}' does not exist in bucket '{data['bucket']}', skipping sanitizing")
-            sys.exit()
+            sys.exit(0)
 
         logging.info(f"Starting sanitizing of file '{data['name']}'")
 
-        # Write file contents to temporary file
-        temp_file_save = None
-        temp_file = tempfile.NamedTemporaryFile(mode='w+b', suffix=mimetypes.guess_extension(data['contentType']))
-        source_blob.download_to_filename(temp_file.name)
-
-        try:
-            if data['contentType'] == 'application/pdf':
-                temp_file_save = sanitize_pdf_file(data, temp_file)
-            elif data['contentType'] == 'image/jpeg':
-                temp_file_save = sanitize_jpeg_file(temp_file)
-            elif data['contentType'] == 'image/png':
-                temp_file_save = sanitize_png_file(temp_file)
-        except Exception as e:
-            temp_file.close()
-
-            logging.info(f"An exception occurred when sanitizing file '{data['name']}', skipping sanitizing: {str(e)}")
-            sys.exit()
-
-        if temp_file_save:
-            self.write_stream_to_blob(
-                path=data['name'], content=open(temp_file_save.name, 'rb'), content_type=data['contentType'])
-            os.unlink(temp_file_save.name)  # Unlink
-
-            logging.info(
-                f"File '{data['name']}' has been successfully sanitized and " +
-                f"moved to bucket '{self.target_bucket_name}'")
+        if data['contentType'] in ['image/jpeg', 'image/png']:
+            self.process_image(data)
         else:
-            logging.info(f"File '{data['name']}' has been unsuccessfully sanitized")
+            self.process_pdf(data)
 
-    def write_stream_to_blob(self, path, content, content_type):
+    def process_image(self, data):
+        # Setting chunk sizes
+        file_size = int(data['size'])
+        chunk_size = 10485760 if file_size > 26214400 else 5242880  # 10MB if file > 25MB else 5MB
+        current_chunk = 0
+
+        # Setting streams
+        stream_down = io.BytesIO()
+        stream_up = io.BytesIO()
+
         try:
-            with GCSObjectStreamUpload(
-                    client=self.stg_client, bucket_name=self.target_bucket_name, blob_name=path,
-                    content_type=content_type) as f, content as fp:
-                buffer = fp.read(1024)
-                while buffer:
-                    f.write(buffer)
-                    buffer = fp.read(1024)
+            # Creating Download and Upload objects
+            download = ChunkedDownload(data['mediaLink'], chunk_size, stream_down)
+            upload = ResumableUpload(
+                f"https://www.googleapis.com/upload/storage/v1/b/{self.target_bucket_name}/o?uploadType=resumable",
+                chunk_size)
+
+            # Initiate upload
+            upload.initiate(
+                self.transport, stream_up, {'name': data['name']}, data['contentType'],
+                total_bytes=file_size, stream_final=False)
+
+            while download.finished is False:
+                logging.debug(f"Processing chunk {current_chunk + 1} of {math.ceil((file_size/chunk_size))}")
+                response = download.consume_next_chunk(self.transport)
+
+                na = np.array(response.content)
+                sanitized_content = na.tobytes()
+
+                stream_up.write(sanitized_content)
+                stream_up.seek(current_chunk * chunk_size)
+
+                upload.transmit_next_chunk(self.transport)
+                current_chunk += 1
         except Exception as e:
-            logging.info(f"An exception occurred when moving file '{path}', skipping moving: {str(e)}")
-            sys.exit()
+            logging.exception(e)
 
+    def process_pdf(self, data):
+        # Setting chunk sizes
+        file_size = int(data['size'])
+        chunk_size = 10485760 if file_size > 26214400 else 5242880  # 10MB if file > 25MB else 5MB
+        current_chunk = 0
 
-def sanitize_pdf_file(data, temp_file):
-    # Remove links from PDF file
-    writer = PdfFileWriter()
-    try:
-        reader = PdfFileReader(temp_file, strict=False)
-        [writer.addPage(reader.getPage(i)) for i in range(0, reader.getNumPages())]
-        writer.removeLinks()
-    except utils.PdfReadWarning as e:
-        logging.info(
-            f"An exception occurred when reading PDF file '{data['name']}', continuing sanitizing: {str(e)}")
-        pass
+        # Open temporary file
+        temp_file = tempfile.TemporaryFile('wb+')
 
-    # Unlink original temp file
-    temp_file.close()
+        # Setting download stream
+        stream_down = io.BytesIO()
+        download = ChunkedDownload(data['mediaLink'], chunk_size, stream_down)
 
-    with tempfile.NamedTemporaryFile(mode='w+b', delete=False) as temp_flat_file:
-        writer.write(temp_flat_file)
-        temp_flat_file.close()
+        try:
+            while download.finished is False:
+                logging.debug(f"Downloading chunk {current_chunk + 1} of {math.ceil((file_size / chunk_size))}")
+                response = download.consume_next_chunk(self.transport)
 
-    return temp_flat_file
+                temp_file.write(response.content)
+                current_chunk += 1
+        except Exception as e:
+            logging.info(
+                f"An exception occurred while downloading file '{data['name']}', skipping sanitizing: {str(e)}")
+            sys.exit(0)
 
+        writer = PdfFileWriter()
+        try:
+            reader = PdfFileReader(temp_file)
+            temp_file.close()
+            writer.appendPagesFromReader(reader)
 
-def sanitize_jpeg_file(temp_file):
-    # Load image
-    im = Image.open(temp_file.name)
-    temp_file.close()
+            writer.removeLinks()
+        except utils.PdfReadWarning as e:
+            logging.info(
+                f"A PDF Read Warning occurred when reading PDF file '{data['name']}', continuing sanitizing: {str(e)}")
+            pass
+        except Exception as e:
+            logging.info(
+                f"An exception occurred when reading PDF file '{data['name']}', skipping sanitizing: {str(e)}")
+            sys.exit(0)
 
-    # Convert to format that cannot store IPTC/EXIF or comments, i.e. Numpy array
-    na = np.array(im)
+        # Start file upload
+        current_chunk = 0
+        stream_up = io.BytesIO()
+        writer.write(stream_up)
+        stream_up.seek(0)
 
-    # Create new image from the Numpy array and save
-    temp_file_sanitized = tempfile.NamedTemporaryFile(mode='w+b', delete=False)
-    Image.fromarray(na).save(temp_file_sanitized.name, format='jpeg')
+        del writer
+        del reader
+        temp_file.close()
 
-    # Return temporary file
-    temp_file_sanitized.close()
-    return temp_file_sanitized
+        try:
+            # Start file upload
+            upload = ResumableUpload(
+                f"https://www.googleapis.com/upload/storage/v1/b/{self.target_bucket_name}/o?uploadType=resumable",
+                chunk_size)
 
+            upload.initiate(
+                self.transport, stream_up, {'name': data['name']}, data['contentType'],
+                total_bytes=stream_up.getbuffer().nbytes)
 
-def sanitize_png_file(temp_file):
-    # Load image
-    im = Image.open(temp_file.name)
-    temp_file.close()
-
-    # Convert to format that cannot store IPTC/EXIF or comments, i.e. Numpy array
-    na = np.array(im)
-
-    # Create new image from the Numpy array
-    result = Image.fromarray(na)
-
-    # Copy forward the palette, if any
-    palette = im.getpalette()
-    if palette is not None:
-        result.putpalette(palette)
-
-    # Save result
-    temp_file_sanitized = tempfile.NamedTemporaryFile(mode='w+b', delete=False)
-    result.save(temp_file_sanitized, format='png')
-
-    # Return temporary file
-    temp_file_sanitized.close()
-    return temp_file_sanitized
+            while upload.finished is False:
+                logging.debug(
+                    f"Uploading chunk {current_chunk + 1} of {math.ceil((stream_up.getbuffer().nbytes / chunk_size))}")
+                upload.transmit_next_chunk(self.transport)
+                current_chunk += 1
+        except Exception as e:
+            logging.info(
+                f"An exception occurred while uploading file '{data['name']}', skipping sanitizing: {str(e)}")
+            sys.exit(0)
 
 
 def gcs_file_sanitizer(data, context):
@@ -162,11 +168,14 @@ def gcs_file_sanitizer(data, context):
         logging.error("Function does not have correct configuration")
         sys.exit(1)
 
-    GGSFileSanitizer().sanitize(data)
+    try:
+        GGSFileSanitizer().sanitize(data)
+    except MemoryError as error:
+        logging.error(error)
 
 
 if __name__ == '__main__':
-    with open('payload.json', 'r') as json_file:
+    with open('payload_3.json', 'r') as json_file:
         payload = json.load(json_file)
 
     gcs_file_sanitizer(payload['data'], payload['context'])
