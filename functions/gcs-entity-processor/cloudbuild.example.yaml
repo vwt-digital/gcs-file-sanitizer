@@ -1,0 +1,19 @@
+---
+steps:
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: 'gcloud'
+    args:
+      - 'functions'
+      - 'deploy'
+      - '${PROJECT_ID}-gcs-entity-processor-func'
+      - '--entry-point=gcs_entity_processor'
+      - '--runtime=python37'
+      - '--trigger-resource="TRIGGER-BUCKET-NAME"'
+      - '--trigger-event=google.storage.object.finalize'
+      - '--project=${PROJECT_ID}'
+      - '--region=europe-west1'
+      - '--max-instances=10'
+      - '--set-env-vars'
+      - 'FILE_DATABASE_TYPE="database-type"'
+      - 'FILE_DATABASE_NAME="database-name"'
+    dir: 'gcs-entity-processor'
